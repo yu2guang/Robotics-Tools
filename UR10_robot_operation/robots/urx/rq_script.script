@@ -1,0 +1,672 @@
+  # modbus_add_signal("192.168.1.11", 255, 0, 3, "gripper_O0", False)
+  # modbus_set_signal_update_frequency("gripper_O0", 10)
+  # modbus_add_signal("192.168.1.11", 255, 1, 3, "gripper_O1", False)
+  # modbus_set_signal_update_frequency("gripper_O1", 10)
+  # modbus_add_signal("192.168.1.11", 255, 2, 3, "gripper_O2", False)
+  # modbus_set_signal_update_frequency("gripper_O2", 10)
+  # modbus_add_signal("192.168.1.11", 255, 0, 2, "gripper_I0", False)
+  # modbus_set_signal_update_frequency("gripper_I0", 10)
+  # modbus_add_signal("192.168.1.11", 255, 1, 2, "gripper_I1", False)
+  # modbus_set_signal_update_frequency("gripper_I1", 10)
+  # set_standard_analog_input_domain(0, 1)
+  # set_standard_analog_input_domain(1, 1)
+  # set_tool_analog_input_domain(0, 1)
+  # set_tool_analog_input_domain(1, 1)
+  # set_analog_outputdomain(0, 0)
+  # set_analog_outputdomain(1, 0)
+  # set_tool_voltage(0)
+  # set_input_actions_to_default()
+  # modbus_set_runstate_dependent_choice("gripper_O0",0)
+  # modbus_set_runstate_dependent_choice("gripper_O1",0)
+  # modbus_set_runstate_dependent_choice("gripper_O2",0)
+  # set_tcp(p[0.0,0.0,0.277,0.0,0.0,-0.7854])
+  # set_payload(2.7, [0.0, 0.0, 0.12])
+  # set_gravity([0.0, 0.0, 9.82])
+  # begin: URCap Installation Node
+  #   Source: Robotiq_Force_Torque_Sensor, 1.2.1, Robotiq Inc.
+  #   Type: FT Sensor
+  ###############################################################
+  # Script file used to communicate with Robotiq's ft sensor
+  # Version: 0.0.1
+  ###############################################################
+      
+  path_server = rpc_factory("xmlrpc","http://localhost:4251/path")
+  linalg = rpc_factory("xmlrpc","http://localhost:4251/linalg")
+  
+  global rq_from=0.0
+  global rq_path_id=0
+  global rq_timeof_path=-1
+  global rq_path_reference_frame = get_actual_tcp_pose()
+
+  global Fx = 0.0
+  global Fy = 0.0
+  global Fz = 0.0
+  global Mx = 0.0
+  global My = 0.0
+  global Mz = 0.0
+
+  def rq_move_relative(P_from, P_to, Pi):
+    return pose_trans(P_to, pose_trans(pose_inv(P_from), Pi))
+  end  
+
+  def poseToList(p):
+    return [p[0], p[1], p[2], p[3], p[4], p[5]]
+  end
+  
+  def listToPose(l):
+    return p[l[0], l[1], l[2], l[3], l[4], l[5]]
+  end
+
+  def rq_element_wise_substract(l1, l2):
+    global r = l1
+    i=0
+    while i<length(r):
+      r[i]=l1[i]-l2[i]
+      i=i+1
+    end
+    return r
+  end
+
+  def rq_element_wise_abs(val):
+      global rval = val
+      i=0
+      while i<length(rval):
+        rval[i]=norm(rval[i])
+        i=i+1
+      end
+      return rval
+  end
+
+  def rq_max(l):
+     global vmax = l[0]
+     i=1
+     while i<length(l):
+       if l[i] > vmax:
+          vmax = l[i]
+       end
+       i=i+1
+     end
+     return vmax
+  end
+
+  def rq_is_savate(j1, j2):
+      #calculer le deplacement articulaire maximale pour empecher les savates
+      max_joint_displacement = rq_max(rq_element_wise_abs(rq_element_wise_substract(j1, j2)))
+      if max_joint_displacement > d2r(45):
+        handleInitPathStatusCode(1)
+      end
+  end
+  
+  thread rq_getjointpositions():
+    textmsg("rq_getjointpositions from ", rq_from)
+    rq_jointpositions_buffer  = path_server.getjointpositions(rq_path_id, rq_from, rq_from + 1.9999, 0.008)
+    rq_tcppositions_buffer = path_server.gettcpposes(rq_path_id, rq_from, rq_from + 1.9999, 0.008)
+  end
+
+  def rqinitpath(pathId):
+    initPathAnswer = path_server.initpath(pathId)
+
+    rq_timeof_path = initPathAnswer[0]
+    initPathStatusCode = initPathAnswer[1]
+
+    textmsg("rq_timeof_path: ", rq_timeof_path)
+    textmsg("init path status code: ", initPathStatusCode)
+
+    handleInitPathStatusCode(initPathStatusCode)
+  end
+
+  def handleInitPathStatusCode(initPathStatusCode):
+    if initPathStatusCode == -1:
+      popup("Could not compute path with the selected options.", "Robotiq's FT Sensor", error=True)
+      rq_timeof_path = 0
+    elif initPathStatusCode == 1:
+      popup("Discontinuous path detected. Change your starting position.", "Robotiq's FT Sensor", error=True)
+      rq_timeof_path = 0
+    elif initPathStatusCode == 2:
+      popup("Joint solution impossible. Change your starting position.", "Robotiq's FT Sensor", error=True)
+      rq_timeof_path = 0
+    elif initPathStatusCode == 3:
+      popup("Path time limit has been reached. Increase the speed of your path or break it down in multiple shorter paths.", "Robotiq's FT Sensor", error=True)
+      rq_timeof_path = 0
+    elif initPathStatusCode == 4:
+      popup("Could not compute path with the selected options. Computing path timeout.", "Robotiq's FT Sensor", error=True)
+      rq_timeof_path = 0
+    end
+
+    if initPathStatusCode != 0:
+      halt
+    end
+  end
+
+  def rqpath(pathId):
+    rq_path_id = pathId
+
+    if rq_timeof_path == -1:
+       rqinitpath(pathId)
+    end
+
+    if rq_timeof_path != 0:
+
+        textmsg("starting path")
+        rq_path_starting_pose = rq_path_reference_frame
+
+        pathsize = rq_timeof_path * 125
+
+        global rq_tcppositions_buffer = path_server.gettcpposes(rq_path_id, 0.0, 1.9999, 0.008)
+        global rq_jointpositions_buffer  = path_server.getjointpositions(rq_path_id, 0.0, 1.9999, 0.008)
+
+        rq_tcp_path = rq_tcppositions_buffer[0]
+        rq_joint_path = get_inverse_kin(rq_tcp_path, poseToList(rq_jointpositions_buffer[0]))
+        rq_previous_joint_path = rq_joint_path
+
+        movej(rq_joint_path, a=0.4)
+        servoj(rq_joint_path, 0.1, 0.1, 0.000, 0.1, 500)#évite un "bang", bug UR dans le target pose des servoj semble-t-il...
+
+        rq_path_starting_pose = get_actual_tcp_pose()
+        rq_path_reference_frame = rq_path_starting_pose
+
+        textmsg("start")
+
+        i=0
+        while i < pathsize:
+          jointpositions = rq_jointpositions_buffer
+          tcppositions = rq_tcppositions_buffer
+          
+          if (i+250) < pathsize:
+            rq_from = (i+250)*0.008
+            thrd = run rq_getjointpositions()
+          end
+
+          j = 0
+          while (j < 250) and (i < pathsize) :
+            rq_tcp_path = tcppositions[j]
+            rq_joint_path = get_inverse_kin(rq_move_relative(rq_path_starting_pose, rq_path_reference_frame, rq_tcp_path))
+            rq_is_savate(rq_previous_joint_path, rq_joint_path)
+            rq_previous_joint_path = rq_joint_path
+
+            servoj(rq_joint_path, 0.1, 0.1, 0.008, 0.05, 500)
+            j = j+1
+            i = i+1
+          end
+
+          if i != pathsize:
+            join thrd
+          end
+
+        end
+
+        textmsg("path finished")
+
+    end
+      
+  end #rqpath
+
+  def rq_zero_sensor():
+    if (socket_open("127.0.0.1", 63350, "rq_ft_sensor_acc")):
+        socket_send_string("SET ZRO", "rq_ft_sensor_acc")
+        sleep(0.1)
+        socket_close("rq_ft_sensor_acc")
+    end
+  end
+
+  def get_sensor_fx():
+    return Fx
+  end
+
+  def get_sensor_fy():
+    return Fy
+  end
+
+  def get_sensor_fz():
+    return Fz
+  end
+
+  def get_sensor_mx():
+    return Mx
+  end
+
+  def get_sensor_my():
+    return My
+  end
+
+  def get_sensor_mz():
+    return Mz
+  end
+
+  thread read_force():
+    while True:
+        socket_send_string("READ DATA", "rq_ft_sensor_stream")
+        rq_sensor_data = socket_read_ascii_float(6, "rq_ft_sensor_stream")
+
+        if (rq_sensor_data[0] >= 6):
+            Fx = rq_sensor_data[1]
+            Fy = rq_sensor_data[2]
+            Fz = rq_sensor_data[3]
+            Mx = rq_sensor_data[4]
+            My = rq_sensor_data[5]
+            Mz = rq_sensor_data[6]
+        else:
+            Fx = 0.0
+            Fy = 0.0
+            Fz = 0.0
+            Mx = 0.0
+            My = 0.0
+            Mz = 0.0
+        end
+    end
+  end
+
+  ################################
+  # MAIN
+  ################################
+
+  if (not socket_open("127.0.0.1", 63351, "rq_ft_sensor_stream")):
+    popup("Can't connect to the FT Sensor driver", "Robotiq's FT Sensor", error=True)
+  end
+
+  socket_close("rq_ft_sensor_stream")
+  if (socket_open("127.0.0.1", 63350, "rq_ft_sensor_stream")):
+    run read_force()
+  else:
+    popup("Can't connect to the FT Sensor driver", "Robotiq's FT Sensor", error=True)
+  end
+rtde_set_watchdog("external_force_torque", 5, "ignore")
+enable_external_ft_sensor(False)
+textmsg("disable external sensor")  # end: URCap Installation Node
+  # begin: URCap Installation Node
+  #   Source: Robotiq_3-Finger_Adaptive_Gripper, 1.0.0, Robotiq inc.
+  #   Type: 3F Gripper
+  # Robotiq inc.  2017
+  
+  ################################################################
+  ## urcaps for the Robotiq's 3F Gripper
+  ################################################################
+  
+  # aliases for the gripper output names
+  # those values also represent offsets
+  # in control registers
+  rACT = 1
+  rMOD = 2
+  rGTO = 8
+  rATR = 16
+  rPOS = 3
+  rFOR = 5
+  rSPE = 11
+  
+  # aliases for the gripper input names
+  # those values also represent offsets
+  # in control registers
+  gPRE = 1
+  gACT = 8
+  gMOD = 9
+  gMOD1 = 9
+  gMOD2 = 10
+  gFLT = 19
+  gFLT1 = 8
+  gFLT2 = 9
+  gFLT3 = 10
+  gFLT4 = 11
+  gGTO = 11
+  gIMC = 12
+  gIMC1 = 12
+  gIMC2 = 13
+  gSTA = 14
+  gSTA1 = 14
+  gSTA2 = 15
+  
+  #define modbus signal
+  modbus_delete_signal("gripper_O0")
+  modbus_delete_signal("gripper_O1")
+  modbus_delete_signal("gripper_O2")
+  modbus_delete_signal("gripper_I0")
+  modbus_delete_signal("gripper_I1")
+
+
+  modbus_add_signal("192.168.0.103",255,0,3,"gripper_O0")
+  modbus_set_signal_update_frequency("gripper_O0", 10)
+  modbus_add_signal("192.168.0.103",255,1,3,"gripper_O1")
+  modbus_set_signal_update_frequency("gripper_O1", 10)
+  modbus_add_signal("192.168.0.103",255,2,3,"gripper_O2")
+  modbus_set_signal_update_frequency("gripper_O2", 10)
+  modbus_add_signal("192.168.0.103",255,0,2,"gripper_I0")
+  modbus_set_signal_update_frequency("gripper_I0", 10)
+  modbus_add_signal("192.168.0.103",255,1,2,"gripper_I1")
+  modbus_set_signal_update_frequency("gripper_I1", 10)
+  modbus_set_runstate_dependent_choice("gripper_O0",0)
+  modbus_set_runstate_dependent_choice("gripper_O1",0)
+  modbus_set_runstate_dependent_choice("gripper_O2",0)
+
+  
+  
+  
+  # send the activation request to the gripper.
+  def rq_activate():
+  	rq_set_var(rACT,1)
+  
+      ACT = rq_get_var(gACT)
+      while (ACT != 1):
+          ACT = rq_get_var(gACT)
+      end
+  end
+  
+  # send the activation request to the gripper and
+  # wait for its completion.
+  def rq_activate_and_wait():
+  	rq_activate()
+  
+  	while(not rq_is_gripper_activated()):
+  		# wait for activation completed
+  	end
+  end
+  def rq_act_and_wait():
+    rq_activate_and_wait()
+  end
+  
+  # interrupts the gripper motion.
+  def rq_stop():
+  	rq_set_var(rGTO,0)
+  
+      GTO = rq_get_var(gGTO)
+      while (GTO != 0):
+          GTO = rq_get_var(gGTO)
+      end
+  end
+  
+  # resets the activation and auto-release bits.
+  def rq_reset():
+  	rq_set_var(rATR,0)
+  	rq_set_var(rACT,0)
+  
+      ACT = rq_get_var(gACT)
+      while (ACT != 0):
+          ACT = rq_get_var(gACT)
+      end
+  end
+  
+  # send the auto-release request and wait
+  # for its completion
+  def rq_auto_release_and_wait():
+  	rq_set_var(rACT,1)
+  	rq_set_var(rATR,1)
+  
+      ACT = rq_get_var(gACT)
+      while (ACT != 1):
+          ACT = rq_get_var(gACT)
+      end
+  
+  	FLT = rq_get_var(gFLT)
+  	while(FLT != 15):
+  		FLT = rq_get_var(gFLT)
+  	end
+  end
+  
+  # set the force setpoint
+  def rq_set_force(force):
+  	rq_set_var(rFOR,force)
+  end
+  
+  # set the speed setpoint
+  def rq_set_speed(speed):
+  	rq_set_var(rSPE,speed)
+  end
+  
+  # send the open request to the gripper
+  def rq_open():
+  	rq_move(0)
+  end
+  
+  # send the close request to the gripper
+  def rq_close():
+  	rq_move(255)
+  end
+  
+  # send the open request to the gripper and wait
+  # for its completion
+  def rq_open_and_wait():
+  	rq_move_and_wait(0)
+  end
+  def rq_open_wait():
+  	rq_move_and_wait(0)
+  end
+  
+  # send the close request to the gripper and wait
+  # for its completion
+  def rq_close_and_wait():
+  	rq_move_and_wait(255)
+  end
+  def rq_close_wait():
+  	rq_move_and_wait(255)
+  end
+  
+  # send the move request to the position in argument
+  def rq_move(pos):
+  	rq_set_var(rGTO,0)
+  
+  	GTO = rq_get_var(gGTO)
+  	while (GTO != 0):
+  		GTO = rq_get_var(gGTO)
+  	end
+  
+  	rq_set_var(rPOS,pos)
+  
+  	PRE = rq_get_var(gPRE)
+  	while (PRE != pos):
+  		PRE = rq_get_var(gPRE)
+  	end
+  
+  	rq_set_var(rGTO,1)
+  
+  	while (GTO != 1):
+  		GTO = rq_get_var(gGTO)
+  	end
+  
+  end
+  
+  # send the move request to the position in argument
+  # and wait for its completion
+  def rq_move_and_wait(pos):
+  	rq_move(pos)
+  
+  	while (not rq_is_motion_complete()):
+  		# wait for motion completed
+  		sleep(0.01)
+  		sync()
+  	end
+  end
+  def rq_move_wait(pos):
+  	rq_move(pos)
+  
+  	while (not rq_is_motion_complete()):
+  		# wait for motion completed
+  		sleep(0.01)
+  		sync()
+  	end
+  end
+  
+  # send the request to change mode in argument
+  def rq_set_mode(value):
+  	rq_set_var(rMOD, value)
+  
+      MOD = rq_get_var(gMOD)
+      while (MOD != value):
+          MOD = rq_get_var(gMOD)
+      end
+  end
+  
+  # send the request to change to the basic mode
+  def rq_set_basic_mode():
+  	rq_set_mode(0)
+  end
+  def rq_set_basic():
+  	rq_set_mode(0)
+  end
+  
+  # send the request to change to the pinch mode
+  def rq_set_pinch_mode():
+  	rq_set_mode(1)
+  end
+  def rq_set_pinch():
+  	rq_set_mode(1)
+  end
+  
+  # send the request to change to the wide mode
+  def rq_set_wide_mode():
+  	rq_set_mode(2)
+  end
+  def rq_set_wide():
+  	rq_set_mode(2)
+  end
+  
+  # send the request to change to the scissor mode
+  def rq_set_scissor_mode():
+  	rq_set_mode(3)
+  end
+  def rq_set_scissor():
+  	rq_set_mode(3)
+  end
+  
+  # returns True if the gripper has completed its motion
+  # returns False otherwise
+  def rq_is_motion_complete():
+  	STA = rq_get_var(gSTA)
+  
+  	if (STA == 0):
+  		return False
+  	end
+  
+  	return True
+  
+  end
+  
+  # Returns True if the gripper is activated
+  def rq_is_gripper_activated():
+      IMC = rq_get_var(gIMC)
+  
+      if (IMC == 3):
+          return True
+      end
+  
+      return False
+  end
+  
+  # returns True if an object has been detected
+  def rq_is_object_detected():
+  	STA = rq_get_var(gSTA)
+  
+  	if(STA == 1):
+  		return True
+  	elif(STA == 2):
+  		return True
+  	else:
+  		return False
+  	end
+  end
+  def rq_is_obj_detec():
+  	STA = rq_get_var(gSTA)
+  
+  	if(STA == 1):
+  		return True
+  	elif(STA == 2):
+  		return True
+  	else:
+  		return False
+  	end
+  end
+  
+  # prints in the log window the fault status
+  def rq_print_fault_code():
+  	fault_status = rq_get_var(gFLT)
+  
+  	if(fault_status == 0):
+  		textmsg("Gripper Fault : ", "No Fault (0x00)")
+  	elif (fault_status == 5):
+  		textmsg("Gripper Fault : ", "Priority Fault: Action delayed, activation (reactivation) must be completed prior to renewed action (0x05)")
+  	elif (fault_status == 6):
+  		textmsg("Gripper Fault : ", "Priority Fault: Action delayed, mode change must be completed prior to continuing action (0x06)")
+  	elif (fault_status == 7):
+  		textmsg("Gripper Fault : ", "Priority Fault: The activation bit must be set prior to action (0x07)")
+  	elif (fault_status == 9):
+  		textmsg("Gripper Fault : ", "Minor Fault: The communication chip is not ready (may be booting) (0x09)")
+  	elif (fault_status == 10):
+  		textmsg("Gripper Fault : ", "Minor Fault: Changing mode fault, interference detected on Scissor (for less than 20 sec) (0x0A)")
+  	elif (fault_status == 11):
+  		textmsg("Gripper Fault : ", "Minor Fault: Automatic release in progress (0x0B)")
+  	elif (fault_status == 13):
+  		textmsg("Gripper Fault : ", "Major Fault: Activation fault, verify that no interference or other error occurred (0x0D)")
+  	elif (fault_status == 14):
+  		textmsg("Gripper Fault : ", "Major Fault: Changing mode fault, interference detected on Scissor (for more than 20 sec) (0x0E)")
+  	elif (fault_status == 15):
+  		textmsg("Gripper Fault : ", "Major Fault: Automatic release completed. Reset and activation is required (0x0F)")
+  	else:
+  		textmsg("Gripper Fault : ", "Unkwown Fault")
+  	end
+  end
+  
+  # sets the gripper inputs
+  global current_force = 0
+  global current_speed = 0
+  def rq_set_var(name, value):
+  
+  	if (name == rACT):
+          MOD = rq_get_var(gMOD)
+          GTO = rq_get_var(gGTO)
+          modbus_set_output_register("gripper_O0", 256 * (rACT * value + rMOD * MOD + rGTO * GTO), False)
+  	elif (name == rMOD):
+          ACT = rq_get_var(gACT)
+          GTO = rq_get_var(gGTO)
+          modbus_set_output_register("gripper_O0", 256 * (rACT * ACT + rMOD * value + rGTO * GTO), False)
+  	elif (name == rGTO):
+          ACT = rq_get_var(gACT)
+          MOD = rq_get_var(gMOD)
+         	modbus_set_output_register("gripper_O0", 256 * (rACT * ACT + rMOD * MOD + rGTO * value), False)
+  	elif (name == rATR):
+          ACT = rq_get_var(gACT)
+          MOD = rq_get_var(gMOD)
+          GTO = rq_get_var(gGTO)
+         	modbus_set_output_register("gripper_O0", 256 * (rACT * ACT + rMOD * MOD + rGTO * GTO + rATR * value), False)
+  	elif (name == rFOR):
+          current_force = value
+          modbus_set_output_register("gripper_O2", (256 * current_speed + value), False)
+  	elif (name == rSPE):
+          current_speed = value
+         	modbus_set_output_register("gripper_O2", (256 * value + current_force), False)
+  	elif (name == rPOS):
+          modbus_set_output_register("gripper_O1", value, False)
+      else:
+      end
+  
+      sync()
+  end
+  
+  # reads the gripper outputs
+  def rq_get_var(name, nbr_bytes=0):
+      if (name == gACT):
+          reg = integer_to_binary_list(modbus_get_signal_status("gripper_I0", False))
+          value = binary_list_to_integer([reg[gACT]])
+      elif (name == gMOD):
+          reg = integer_to_binary_list(modbus_get_signal_status("gripper_I0", False))
+          value = binary_list_to_integer([reg[gMOD1], reg[gMOD2]])
+      elif (name == gGTO):
+          reg = integer_to_binary_list(modbus_get_signal_status("gripper_I0", False))
+          value = binary_list_to_integer([reg[gGTO]])
+      elif (name == gSTA):
+          reg = integer_to_binary_list(modbus_get_signal_status("gripper_I0", False))
+          value = binary_list_to_integer([reg[gSTA1], reg[gSTA2]])
+      elif (name == gIMC):
+          reg = integer_to_binary_list(modbus_get_signal_status("gripper_I0", False))
+          value = binary_list_to_integer([reg[gIMC1], reg[gIMC2]])
+      elif (name == gFLT):
+          reg = integer_to_binary_list(modbus_get_signal_status("gripper_I1", False))
+          value = binary_list_to_integer([reg[gFLT1], reg[gFLT2], reg[gFLT3], reg[gFLT4]])
+      elif (name == gPRE):
+          reg = modbus_get_signal_status("gripper_I1", False)
+          value = reg % 256
+      else:
+     	    value = 0
+      end
+  
+      sync()
+  
+      return value
+  end
+  # end: URCap Installation Node
